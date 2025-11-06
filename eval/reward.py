@@ -65,7 +65,9 @@ def main(args):
     acc = sum(correctness_list) / len(correctness_list)
     k = len(ds[0]["prediction"])
     pass_k = sum([any(ds[i]["correctness"]) for i in range(len(ds))]) / len(ds)
-    scores = f"#questions: {len(ds)}\taccuracy: {acc:.4f}\tpass@{k}: {pass_k:.4f}"
+    avg_len = int(sum(response_length_list)/len(response_length_list))
+
+    scores = f"#questions: {len(ds)}\taccuracy: {acc:.4f}\tpass@{k}: {pass_k:.4f}\tavg length: {avg_len}"
     print(scores)
 
     # Save
