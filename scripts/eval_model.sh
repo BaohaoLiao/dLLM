@@ -8,7 +8,7 @@ data_path=/mnt/nushare2/data/baliao/dynamic_filter/data
 K=3
 GPUS=(0)
 
-models=("/mnt/nushare2/data/baliao/PLLMs/Gen-Verse/TraDo-4B-Instruct")
+models=("Gen-Verse/TraDo-4B-Instruct")
 datasets=("AIME2024" "MATH500")
 
 # Loop through models and datasets
