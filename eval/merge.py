@@ -48,7 +48,7 @@ def main(args):
                 "index": i,
                 **sample
             }
-            json.dump(sample_with_index, f, indent=2, ensure_ascii=False)
+            json.dump(sample_with_index, f, ensure_ascii=False)
             f.write("\n")
 
 
