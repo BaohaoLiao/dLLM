@@ -129,7 +129,7 @@ class TradoThinkingModel(BaseChatTemplate):
                  eoh='<|im_end|>\n',
                  eoa='<|im_end|>',
                  separator='\n',
-                 stop_words=['<|im_end|>', '<|action_end|>']):
+                 stop_words=['<|im_end|>']):
         super().__init__(system=system,
                          meta_instruction=meta_instruction,
                          eosys=eosys,
