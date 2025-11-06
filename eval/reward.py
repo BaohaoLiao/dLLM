@@ -25,8 +25,13 @@ def parse_args():
 
 def main(args):
     # Load dataset
-    with open(args.dataset_path, "r") as f:
-        ds = json.load(f)
+    ds = []
+    with open(args.dataset_path, "r", encoding="utf8") as f:
+        for line in f:
+            if line.strip():                
+                ds.append(json.loads(line))
+
+    print("Loaded", len(ds), "samples")
 
     # Reformat
     index_list = []
@@ -34,7 +39,7 @@ def main(args):
     gt_list = []
     response_length_list = []
     for i in range(len(ds)):
-        index_list = index_list + [i] * len(ds[i]["prediction"])
+        index_list = index_list + [ds[i]["index"]] * len(ds[i]["prediction"])
         prediction_list = prediction_list + ds[i]["extracted_output"]
         response_length_list = response_length_list + ds[i]["response_length"]
         gt_list = gt_list + [ds[i]["ground_truth_answer"]] * len(ds[i]["prediction"])

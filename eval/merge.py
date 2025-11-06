@@ -43,8 +43,12 @@ def main(args):
 
     # Save to file
     with open(args.output_path, "w", encoding="utf8") as f:
-        for i in range(len(gathered_data)):
-            json.dump(gathered_data[i], f, indent=2, ensure_ascii=False)
+        for i, sample in enumerate(gathered_data):
+            sample_with_index = {
+                "index": i,
+                **sample
+            }
+            json.dump(sample_with_index, f, indent=2, ensure_ascii=False)
             f.write("\n")
 
 
