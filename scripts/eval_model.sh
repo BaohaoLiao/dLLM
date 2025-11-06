@@ -2,12 +2,8 @@
 
 save_dir=./outputs/TraDo-4B-Instruct
 dataset_dir=./data
-data_path=/mnt/nushare2/data/baliao/dynamic_filter/data
-
-# Configuration
 K=3
 GPUS=(0)
-
 models=("Gen-Verse/TraDo-4B-Instruct")
 datasets=("AIME2024" "MATH500")
 
