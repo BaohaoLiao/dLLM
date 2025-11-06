@@ -66,6 +66,7 @@ def main(args):
     k = len(ds[0]["prediction"])
     pass_k = sum([any(ds[i]["correctness"]) for i in range(len(ds))]) / len(ds)
     scores = f"#questions: {len(ds)}\taccuracy: {acc:.4f}\tpass@{k}: {pass_k:.4f}"
+    print(scores)
 
     # Save
     with open(args.record_path, "w") as f:
