@@ -3,7 +3,7 @@ import argparse
 import asyncio
 import nest_asyncio
 from concurrent.futures import ThreadPoolExecutor
-
+import datasets
 from eval.math_utils import is_equal
 
 
@@ -25,25 +25,25 @@ def parse_args():
 
 def main(args):
     # Load dataset
-    ds = []
-    with open(args.dataset_path, "r", encoding="utf8") as f:
-        for line in f:
-            if line.strip():                
-                ds.append(json.loads(line))
-
-    print("Loaded", len(ds), "samples")
+    ds = datasets.load_dataset("json", data_files=args.dataset_path, split="train")
+    ds = list(ds)
 
     # Reformat
     index_list = []
     prediction_list = []
     gt_list = []
     response_length_list = []
-    for i in range(len(ds)):
-        index_list = index_list + [ds[i]["index"]] * len(ds[i]["prediction"])
-        prediction_list = prediction_list + ds[i]["extracted_output"]
-        response_length_list = response_length_list + ds[i]["response_length"]
-        gt_list = gt_list + [ds[i]["ground_truth_answer"]] * len(ds[i]["prediction"])
-        ds[i]["correctness"] = []
+
+    for i, sample in enumerate(ds):
+        preds = sample["prediction"]
+        n_preds = len(preds)
+        
+        index_list.extend([sample["index"]] * n_preds)
+        prediction_list.extend(preds)
+        gt_list.extend([sample["ground_truth_answer"]] * n_preds)
+        response_length_list.extend(sample["response_length"])
+        
+        sample["correctness"] = []
 
     # Compute scores
     nest_asyncio.apply()
@@ -65,7 +65,7 @@ def main(args):
     acc = sum(correctness_list) / len(correctness_list)
     k = len(ds[0]["prediction"])
     pass_k = sum([any(ds[i]["correctness"]) for i in range(len(ds))]) / len(ds)
-    scores = f"accuracy: {acc:.4f}\tpass@{k}: {pass_k:.4f}"
+    scores = f"#questions: {len(ds)}\taccuracy: {acc:.4f}\tpass@{k}: {pass_k:.4f}"
 
     # Save
     with open(args.record_path, "w") as f:
