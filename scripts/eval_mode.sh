@@ -51,7 +51,7 @@ for model_name in "${models[@]}"; do
         echo "Merging data..."
         python3 eval/merge.py \
             --base_path ${output_dir}\
-            --output_path ${output_dir}/merged_data.json \
+            --output_path ${output_dir}/merged_data.jsonl \
             --num_splits ${#GPUS[@]}
         
         if [ $? -ne 0 ]; then
@@ -62,7 +62,7 @@ for model_name in "${models[@]}"; do
         # Compute scores
         echo "Computing scores..."
         python3 eval/reward.py \
-            --dataset_path ${output_dir}/merged_data.json \
+            --dataset_path ${output_dir}/merged_data.jsonl \
             --record_path ${output_dir}/record.txt
         
         if [ $? -ne 0 ]; then
