@@ -197,7 +197,7 @@ def main(args):
         random_seed=args.seed,
     )
     messages = [m for m in ds["message"] for _ in range(args.n)]  # Repeat n times
-    outputs = pipe(messages, gen_config=gen_config)
+    outputs = pipe(messages, gen_config=gen_config, use_tqdm=True)
 
     responses = []
     response_lengths = []
