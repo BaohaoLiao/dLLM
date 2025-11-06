@@ -149,7 +149,7 @@ def main(args):
     np.random.seed(args.seed)
 
     # Load data
-    data_path = os.path.join(args.dataset_dir, args.dataset)
+    data_path = os.path.join(args.dataset_dir, args.dataset + "json")
     ds = datasets.load_dataset("json", data_files=data_path, split="train")
 
     def make_prompt(example):
