@@ -4,7 +4,10 @@ import argparse
 import torch
 import numpy as np
 import datasets
-from lmdeploy import pipeline, PytorchEngineConfig, GenerationConfig
+
+from lmdeploy import pipeline, PytorchEngineConfig, GenerationConfig, ChatTemplateConfig
+from lmdeploy.pytorch.tools.utils import Timer, visualize_pipe_out
+from lmdeploy.model import MODELS, BaseChatTemplate
 
 
 def parse_args():
@@ -115,6 +118,29 @@ def parse_args():
     return parser.parse_args()
 
 
+@MODELS.register_module(name='trado_thinking_model')
+class TradoThinkingModel(BaseChatTemplate):
+    def __init__(self,
+                 system='',
+                 meta_instruction='',
+                 user='<|im_start|>user\n',
+                 assistant='<|im_start|>assistant<think>\n',
+                 eosys='<|im_end|>\n',
+                 eoh='<|im_end|>\n',
+                 eoa='<|im_end|>',
+                 separator='\n',
+                 stop_words=['<|im_end|>', '<|action_end|>']):
+        super().__init__(system=system,
+                         meta_instruction=meta_instruction,
+                         eosys=eosys,
+                         user=user,
+                         eoh=eoh,
+                         assistant=assistant,
+                         eoa=eoa,
+                         separator=separator,
+                         stop_words=stop_words)
+
+
 def extract_boxed_answer(s: str):
     tag = r"\boxed{"
     start = s.rfind(tag)  # last \boxed{
@@ -184,7 +210,18 @@ def main(args):
         dllm_unmasking_strategy=args.dllm_unmasking_strategy,
         dllm_confidence_threshold=args.dllm_confidence_threshold,
     )
-    pipe = pipeline(args.model_name_or_path, backend_config=backend_config)
+
+    if "TraDo-8B-Thinking" in args.model_name_or_path:
+        pipe = pipeline(
+            args.model_name_or_path, 
+            backend_config=backend_config, 
+            chat_template_config=ChatTemplateConfig('trado_thinking_model')
+        )
+    else:
+        pipe = pipeline(
+            args.model_name_or_path, 
+            backend_config=backend_config, 
+        )
 
     # Run sampling
     gen_config = GenerationConfig(
