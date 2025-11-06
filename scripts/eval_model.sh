@@ -9,7 +9,7 @@ K=3
 GPUS=(0)
 
 models=("/mnt/nushare2/data/baliao/PLLMs/Gen-Verse/TraDo-4B-Instruct")
-datasets=("AIME2024")
+datasets=("AIME2024" "MATH500")
 
 # Loop through models and datasets
 for model_name in "${models[@]}"; do
