@@ -315,12 +315,24 @@ class LogitsMixin:
 
     def _get_model(self):
         """Get the underlying model."""
-        if self.backend == "pytorch":
-            return self.engine.model_agent.model
+        if self.backend == 'pytorch':
+            # Try different possible paths to access the model
+            if hasattr(self.engine, 'model_agent'):
+                return self.engine.model_agent.model
+            elif hasattr(self.engine, 'model'):
+                return self.engine.model
+            elif hasattr(self.engine, 'engine_instance'):
+                return self.engine.engine_instance.model
+            else:
+                # Inspect the engine to find the model
+                logger = get_logger('lmdeploy')
+                logger.error(f"Engine attributes: {dir(self.engine)}")
+                raise AttributeError(
+                    "Could not find model in engine. Please check engine structure. "
+                    f"Available attributes: {[attr for attr in dir(self.engine) if not attr.startswith('_')]}"
+                )
         else:
-            raise NotImplementedError(
-                "Direct model access only supported for pytorch backend"
-            )
+            raise NotImplementedError("Direct model access only supported for pytorch backend")
 
     def _compute_dllm_ppl_direct(
         self, input_ids_batch: List[List[int]], block_size: int, model
