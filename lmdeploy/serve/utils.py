@@ -378,13 +378,9 @@ class LogitsMixin:
         """
         import torch
         import numpy as np
-        import time
 
         seq_len = len(input_ids)
         mask_token_id = self.engine.model_config.dllm_mask_token
-
-        # Better session ID: use timestamp + sequence index to ensure uniqueness
-        timestamp_offset = int(time.time() * 1000) % 1000000
 
         # Pad sequence to multiple of block_size
         padding_len = (block_size - seq_len % block_size) % block_size
@@ -395,6 +391,10 @@ class LogitsMixin:
 
         all_log_probs = []
         all_decode_orders = []
+
+        # Use single session ID for the entire sequence to reuse KV cache
+        session_id = session_id_base
+        current_step = 0  # Track current KV cache position
 
         # Process each block
         for block_idx in range(num_blocks):
@@ -419,32 +419,34 @@ class LogitsMixin:
 
             # Greedy unmasking: unmask one token at a time
             for unmask_step in range(len(valid_positions)):
-                # Construct full input sequence
+                # Always input: [all_previous_tokens, current_block_state]
+                # Previous blocks are cached in KV, current block needs full context
                 full_input = input_ids[:block_start] + current_block
 
-                # Generate unique session ID
-                session_id = (
-                    timestamp_offset + session_id_base + block_idx * 1000 + unmask_step
+                sequence_start = block_idx == 0 and unmask_step == 0
+                step = current_step if unmask_step == 0 else (current_step + block_size)
+
+                # Get logits
+                logits = await self._async_get_dllm_logits_with_cache(
+                    input_ids=full_input,
+                    session_id=session_id,
+                    sequence_start=sequence_start,
+                    sequence_end=False,  # Keep session alive
+                    step=step,
                 )
 
-                logits = await self._async_get_dllm_logits_single(
-                    input_ids=full_input,
-                    block_start=block_start,
-                    block_size=block_size,
-                    session_id=session_id,
-                )  # [block_size, vocab_size]
+                # Extract logits for current block
+                block_logits = logits[-block_size:, :]
 
                 # Find position with highest peak probability among masked AND valid positions
                 max_peak_prob = -float("inf")
                 next_unmask_pos = None
 
                 for pos in range(block_size):
-                    if pos in unmasked_positions:
-                        continue
-                    if pos not in valid_positions:
+                    if pos in unmasked_positions or pos not in valid_positions:
                         continue
 
-                    probs = torch.softmax(logits[pos], dim=-1)
+                    probs = torch.softmax(block_logits[pos], dim=-1)
                     peak_prob = probs.max().item()
 
                     if peak_prob > max_peak_prob:
@@ -458,7 +460,7 @@ class LogitsMixin:
 
                 # Get probability of ground truth token
                 gt_token_id = ground_truth_block[next_unmask_pos]
-                probs = torch.softmax(logits[next_unmask_pos], dim=-1)
+                probs = torch.softmax(block_logits[next_unmask_pos], dim=-1)
                 gt_prob = probs[gt_token_id].item()
                 log_prob = np.log(gt_prob + 1e-10)
                 all_log_probs.append(log_prob)
@@ -468,6 +470,10 @@ class LogitsMixin:
                 unmasked_positions.add(next_unmask_pos)
 
             all_decode_orders.append(decode_order)
+            current_step += block_size  # Move KV cache position forward by one block
+
+        # End session
+        await self.end_session(session_id)
 
         nll = -np.mean(all_log_probs)
 
