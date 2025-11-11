@@ -333,12 +333,17 @@ class LogitsMixin:
 
         async def _process_single_with_semaphore(seq_input_ids, seq_idx):
             async with semaphore:
-                seq_len, ppl, decode_orders = await self._async_get_single_sequence_dllm_ppl(
+                (
+                    seq_len,
+                    nll,
+                    decode_orders,
+                ) = await self._async_get_single_sequence_dllm_ppl(
                     seq_input_ids, block_size, session_id_base=seq_idx * 10000
                 )
                 return {
                     "num_tokens": seq_len,
-                    "perplexity": ppl,
+                    "nll": nll,
+                    "perplexity": np.exp(nll),
                     "decode_orders": decode_orders,
                     "sequence_index": seq_idx,
                 }
@@ -464,11 +469,9 @@ class LogitsMixin:
 
             all_decode_orders.append(decode_order)
 
-        # Compute perplexity
-        avg_log_prob = np.mean(all_log_probs)
-        perplexity = np.exp(-avg_log_prob)
+        nll = -np.mean(all_log_probs)
 
-        return seq_len, perplexity, all_decode_orders
+        return seq_len, nll, all_decode_orders
 
     async def _async_get_dllm_logits_single(
         self, input_ids: List[int], block_start: int, block_size: int, session_id: int
