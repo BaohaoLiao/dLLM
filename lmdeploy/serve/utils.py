@@ -236,3 +236,209 @@ class LogitsMixin:
             result.append(loss.item() / target_count.item())
         logger.info(f'ppl result: {result}')
         return result
+    
+    def get_dllm_ppl(self, input_ids: Union[List[int], List[List[int]]]) -> List[Dict]:
+        """Get perplexity scores for DLLM models using greedy unmasking strategy.
+        
+        Args:
+            input_ids (Union[List[int], List[List[int]]]): the batch of
+                input token ids (ground truth sequences)
+        
+        Returns:
+            List[Dict]: A list of dictionaries containing:
+                - 'perplexity': float, the perplexity score
+                - 'decode_orders': List[List[int]], decode order for each block
+        """
+        assert isinstance(input_ids, List)
+        if isinstance(input_ids[0], int):
+            input_ids = [input_ids]
+        assert all(len(_) > 1 for _ in input_ids)
+        
+        # Get DLLM configuration
+        dllm_config = self.engine.model_config.dllm_block_length
+        if dllm_config is None:
+            raise ValueError("Model does not have DLLM configuration")
+        
+        block_size = dllm_config
+        
+        # Parallel processing across sequences
+        result = self._run(coro=self._async_get_dllm_ppl_batch(input_ids, block_size)).result()
+        
+        return result
+
+
+    async def _async_get_dllm_ppl_batch(self, input_ids_list: List[List[int]], block_size: int) -> List[Dict]:
+        """Compute perplexity for multiple sequences in parallel.
+        
+        Args:
+            input_ids_list (List[List[int]]): list of ground truth token id sequences
+            block_size (int): DLLM block size
+        
+        Returns:
+            List[Dict]: results for each sequence
+        """
+        import asyncio
+        
+        async def _process_single(seq_input_ids, seq_idx):
+            ppl, decode_orders = await self._async_get_single_sequence_dllm_ppl(
+                seq_input_ids, block_size, session_id_base=seq_idx * 10000
+            )
+            return {
+                'perplexity': ppl,
+                'decode_orders': decode_orders
+            }
+        
+        tasks = [_process_single(seq_input_ids, idx) for idx, seq_input_ids in enumerate(input_ids_list)]
+        results = await asyncio.gather(*tasks)
+        
+        return results
+
+
+    async def _async_get_single_sequence_dllm_ppl(self, input_ids: List[int], block_size: int, 
+                                                    session_id_base: int = 0) -> tuple:
+        """Async version: Compute perplexity for a single sequence using DLLM greedy unmasking.
+        
+        Args:
+            input_ids (List[int]): ground truth token ids
+            block_size (int): DLLM block size
+            session_id_base (int): base session id to avoid conflicts
+        
+        Returns:
+            tuple: (perplexity, decode_orders)
+        """
+        import torch
+        import numpy as np
+        
+        seq_len = len(input_ids)
+        
+        # Get mask token id
+        mask_token_id = self.engine.model_config.dllm_mask_token
+        
+        # Pad sequence to multiple of block_size
+        padding_len = (block_size - seq_len % block_size) % block_size
+        if padding_len > 0:
+            input_ids = input_ids + [mask_token_id] * padding_len
+        
+        num_blocks = len(input_ids) // block_size
+        
+        all_log_probs = []
+        all_decode_orders = []
+        
+        # Process each block
+        for block_idx in range(num_blocks):
+            block_start = block_idx * block_size
+            block_end = block_start + block_size
+            ground_truth_block = input_ids[block_start:block_end]
+            
+            # Determine which positions in this block are valid (not padding)
+            valid_positions = set()
+            for pos in range(block_size):
+                if block_start + pos < seq_len:
+                    valid_positions.add(pos)
+            
+            # Skip if entire block is padding
+            if len(valid_positions) == 0:
+                break
+            
+            # Initialize block with all masks
+            current_block = [mask_token_id] * block_size
+            unmasked_positions = set()
+            decode_order = []
+            
+            # Greedy unmasking: unmask one token at a time
+            for unmask_step in range(len(valid_positions)):
+                # Construct full input sequence
+                full_input = input_ids[:block_start] + current_block
+                
+                # Get logits from model (use unique session_id)
+                session_id = session_id_base + block_idx * 100 + unmask_step
+                logits = await self._async_get_dllm_logits_single(
+                    input_ids=full_input,
+                    block_start=block_start,
+                    block_size=block_size,
+                    session_id=session_id
+                )  # [block_size, vocab_size]
+                
+                # Find position with highest peak probability among masked AND valid positions
+                max_peak_prob = -float('inf')
+                next_unmask_pos = None
+                
+                for pos in range(block_size):
+                    if pos in unmasked_positions:
+                        continue
+                    if pos not in valid_positions:
+                        continue
+                    
+                    probs = torch.softmax(logits[pos], dim=-1)
+                    peak_prob = probs.max().item()
+                    
+                    if peak_prob > max_peak_prob:
+                        max_peak_prob = peak_prob
+                        next_unmask_pos = pos
+                
+                if next_unmask_pos is None:
+                    break
+                
+                decode_order.append(next_unmask_pos)
+                
+                # Get probability of ground truth token
+                gt_token_id = ground_truth_block[next_unmask_pos]
+                probs = torch.softmax(logits[next_unmask_pos], dim=-1)
+                gt_prob = probs[gt_token_id].item()
+                log_prob = np.log(gt_prob + 1e-10)
+                all_log_probs.append(log_prob)
+                
+                # Unmask with ground truth
+                current_block[next_unmask_pos] = gt_token_id
+                unmasked_positions.add(next_unmask_pos)
+            
+            all_decode_orders.append(decode_order)
+        
+        # Compute perplexity
+        avg_log_prob = np.mean(all_log_probs)
+        perplexity = np.exp(-avg_log_prob)
+        
+        return perplexity, all_decode_orders
+
+
+    async def _async_get_dllm_logits_single(self, 
+                                         input_ids: List[int],
+                                         block_start: int,
+                                         block_size: int,
+                                         session_id: int) -> torch.Tensor:
+        """Get logits for a single forward pass.
+        
+        Args:
+            input_ids (List[int]): input sequence with masks
+            block_start (int): start position of the block
+            block_size (int): size of the block
+            session_id (int): unique session id
+        
+        Returns:
+            torch.Tensor: logits for the block, shape [block_size, vocab_size]
+        """
+        from lmdeploy.messages import GenerationConfig
+        
+        async with self.model_inst(session_id=session_id) as inst:
+            gen_config = GenerationConfig(
+                max_new_tokens=0,
+                output_logits='all',
+                top_k=1
+            )
+            
+            async with self.safe_run(inst,
+                                    session_id=session_id,
+                                    input_ids=input_ids,
+                                    gen_config=gen_config,
+                                    stream_output=False,
+                                    sequence_start=True,
+                                    sequence_end=True,
+                                    step=0) as gen:
+                async for outputs in gen:
+                    pass
+                
+                # Extract logits for the target block
+                block_end = block_start + block_size
+                block_logits = outputs.logits[block_start:block_end, :]
+                
+                return block_logits
