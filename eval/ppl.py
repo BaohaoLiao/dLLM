@@ -158,10 +158,9 @@ def main(args):
                     # Prepare result entry
                     result_entry = {
                         "index": global_idx,
-                        "num_tokens": result["num_tokens"],
+                        "num_tokens": len(batch[seq_idx]),
                         "num_blocks": len(decode_orders),
                         "nll": result["nll"],
-                        "perplexity": result["perplexity"],
                     }
 
                     if args.save_decode_orders:
