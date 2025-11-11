@@ -440,11 +440,14 @@ class LogitsMixin:
         
         async with self.model_inst(session_id=session_id) as inst:
             gen_config = GenerationConfig(
-                max_new_tokens=block_size,
+                max_new_tokens=0,
                 output_logits='all',
                 top_k=1,
                 do_sample=False,  # Greedy decoding
             )
+
+            # Collect all outputs
+            all_logits = []
             
             async with self.safe_run(inst,
                                     session_id=session_id,
@@ -455,11 +458,46 @@ class LogitsMixin:
                                     sequence_end=True,
                                     step=0) as gen:
                 async for outputs in gen:
-                    pass
+                    if outputs.logits is not None:
+                        all_logits.append(outputs.logits)
+
+
+            # For DLLM, logits should be available from the last output
+            # The logits correspond to all positions in the current block being decoded
+            if len(all_logits) > 0:
+                # Get the last set of logits which should contain the full block
+                final_logits = all_logits[-1]
                 
                 # Extract logits for the target block
-                block_end = block_start + block_size
-                block_logits = outputs.logits[block_start:block_end, :]
+                # For DLLM in prefill mode, logits shape should be [seq_len, vocab_size]
+                # We want the logits at positions [block_start:block_start+block_size]
+                if final_logits.dim() == 2:
+                    # Shape is [seq_len, vocab_size]
+                    block_end = min(block_start + block_size, final_logits.shape[0])
+                    block_logits = final_logits[block_start:block_end, :]
+                else:
+                    # Unexpected shape, try to handle
+                    logger = get_logger('lmdeploy')
+                    logger.error(f"Unexpected logits shape: {final_logits.shape}")
+                    # Assume we need to reshape or extract differently
+                    block_logits = final_logits
+                
+                # Ensure we have exactly block_size logits
+                if block_logits.shape[0] < block_size:
+                    # Pad if needed
+                    vocab_size = block_logits.shape[1]
+                    padding = torch.zeros(block_size - block_logits.shape[0], vocab_size, 
+                                        device=block_logits.device, dtype=block_logits.dtype)
+                    block_logits = torch.cat([block_logits, padding], dim=0)
+                elif block_logits.shape[0] > block_size:
+                    # Truncate if needed
+                    block_logits = block_logits[:block_size, :]
                 
                 return block_logits
+            else:
+                # No logits returned, this is an error
+                logger = get_logger('lmdeploy')
+                logger.error(f"No logits returned for session {session_id}")
+                # Return None to signal error
+                return None
             
