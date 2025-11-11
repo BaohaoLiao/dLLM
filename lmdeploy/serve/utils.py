@@ -479,25 +479,33 @@ class LogitsMixin:
 
         return seq_len, nll, all_decode_orders
 
-    async def _async_get_dllm_logits_single(
-        self, input_ids: List[int], block_start: int, block_size: int, session_id: int
+    async def _async_get_dllm_logits_with_cache(
+        self,
+        input_ids: List[int],
+        session_id: int,
+        sequence_start: bool,
+        sequence_end: bool,
+        step: int,
     ) -> torch.Tensor:
-        """Get logits for a single forward pass.
+        """Get logits with KV cache management for DLLM perplexity computation.
 
         Args:
-            input_ids (List[int]): input sequence with masks
-            block_start (int): start position of the block
-            block_size (int): size of the block
-            session_id (int): unique session id
+            input_ids (List[int]): full input sequence (previous blocks + current block)
+            session_id (int): session ID for KV cache tracking
+            sequence_start (bool): whether this is the start of the sequence
+            sequence_end (bool): whether to end the session after this forward pass
+            step (int): current position in the KV cache (number of tokens already cached)
 
         Returns:
-            torch.Tensor: logits for the block, shape [block_size, vocab_size]
+            torch.Tensor: logits for all input positions, shape [seq_len, vocab_size]
         """
         from lmdeploy.messages import GenerationConfig
 
         async with self.model_inst(session_id=session_id) as inst:
             gen_config = GenerationConfig(
-                max_new_tokens=0, output_logits="all", top_k=1
+                max_new_tokens=0,  # We only want logits, no generation
+                output_logits="all",  # Get logits for all positions
+                top_k=1,
             )
 
             async with self.safe_run(
@@ -506,15 +514,12 @@ class LogitsMixin:
                 input_ids=input_ids,
                 gen_config=gen_config,
                 stream_output=False,
-                sequence_start=True,
-                sequence_end=True,
-                step=0,
+                sequence_start=sequence_start,
+                sequence_end=sequence_end,
+                step=step,
             ) as gen:
                 async for outputs in gen:
                     pass
 
-                # Extract logits for the target block
-                block_end = block_start + block_size
-                block_logits = outputs.logits[block_start:block_end, :]
-
-                return block_logits
+                # Return all logits
+                return outputs.logits
