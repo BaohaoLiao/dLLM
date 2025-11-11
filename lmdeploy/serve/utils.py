@@ -366,20 +366,19 @@ class LogitsMixin:
     async def _async_get_single_sequence_dllm_ppl(
         self, input_ids: List[int], block_size: int, session_id_base: int = 0
     ) -> tuple:
-        """Async version: Compute perplexity for a single sequence using DLLM greedy unmasking.
+        """Compute perplexity for a single sequence using DLLM greedy unmasking.
 
-        Args:
-            input_ids (List[int]): ground truth token ids
-            block_size (int): DLLM block size
-            session_id_base (int): base session id to avoid conflicts
-
-        Returns:
-            tuple: (perplexity, decode_orders)
+        This version avoids conflicts with the engine's DLLM sequence management.
         """
         import torch
         import numpy as np
+        from lmdeploy.utils import get_logger
+
+        logger = get_logger("lmdeploy")
 
         seq_len = len(input_ids)
+
+        # Get mask token id
         mask_token_id = self.engine.model_config.dllm_mask_token
 
         # Pad sequence to multiple of block_size
@@ -392,58 +391,78 @@ class LogitsMixin:
         all_log_probs = []
         all_decode_orders = []
 
-        # Use single session ID for the entire sequence to reuse KV cache
+        # Use unique session ID for this sequence
         session_id = session_id_base
-        current_step = 0  # Track current KV cache position
 
-        # Process each block
+        # Process each block INDEPENDENTLY to avoid engine state conflicts
         for block_idx in range(num_blocks):
             block_start = block_idx * block_size
             block_end = block_start + block_size
             ground_truth_block = input_ids[block_start:block_end]
 
-            # Determine which positions in this block are valid (not padding)
+            # Determine valid positions
             valid_positions = set()
             for pos in range(block_size):
                 if block_start + pos < seq_len:
                     valid_positions.add(pos)
 
-            # Skip if entire block is padding
             if len(valid_positions) == 0:
                 break
+
+            logger.debug(
+                f"Processing block {block_idx}, valid_positions: {valid_positions}"
+            )
 
             # Initialize block with all masks
             current_block = [mask_token_id] * block_size
             unmasked_positions = set()
             decode_order = []
 
-            # Greedy unmasking: unmask one token at a time
+            # Process this block with iterative unmasking
             for unmask_step in range(len(valid_positions)):
-                # Always input: [all_previous_tokens, current_block_state]
-                # Previous blocks are cached in KV, current block needs full context
-                full_input = input_ids[:block_start] + current_block
+                # Construct input: previous blocks (ground truth) + current block state
+                if block_idx == 0:
+                    # First block: only current block
+                    full_input = current_block
+                else:
+                    # Subsequent blocks: all previous ground truth + current block state
+                    full_input = input_ids[:block_start] + current_block
 
-                sequence_start = block_idx == 0 and unmask_step == 0
-                step = current_step if unmask_step == 0 else (current_step + block_size)
-
-                # Get logits
-                logits = await self._async_get_dllm_logits_with_cache(
-                    input_ids=full_input,
-                    session_id=session_id,
-                    sequence_start=sequence_start,
-                    sequence_end=False,  # Keep session alive
-                    step=step,
+                logger.debug(
+                    f"Block {block_idx}, step {unmask_step}, input len: {len(full_input)}"
                 )
 
-                # Extract logits for current block
-                block_logits = logits[-block_size:, :]
+                try:
+                    # Get logits - use different session for each block+step to avoid state conflicts
+                    step_session_id = session_id_base + block_idx * 1000 + unmask_step
+
+                    logits = await self._async_get_dllm_logits_with_cache(
+                        input_ids=full_input,
+                        session_id=step_session_id,
+                        sequence_start=True,  # Always start fresh to avoid state issues
+                        sequence_end=True,  # Always end to clean up
+                        step=0,  # Don't use KV cache for now
+                    )
+
+                    # Extract logits for current block (last block_size positions)
+                    block_logits = logits[-block_size:, :]
+
+                    logger.debug(
+                        f"Got logits shape: {logits.shape}, block_logits shape: {block_logits.shape}"
+                    )
+
+                except Exception as e:
+                    logger.error(f"Error in block {block_idx}, step {unmask_step}: {e}")
+                    raise
 
                 # Find position with highest peak probability among masked AND valid positions
                 max_peak_prob = -float("inf")
                 next_unmask_pos = None
 
                 for pos in range(block_size):
-                    if pos in unmasked_positions or pos not in valid_positions:
+                    if pos in unmasked_positions:
+                        continue
+                    if pos not in valid_positions:
                         continue
 
                     probs = torch.softmax(block_logits[pos], dim=-1)
@@ -454,6 +473,9 @@ class LogitsMixin:
                         next_unmask_pos = pos
 
                 if next_unmask_pos is None:
+                    logger.warning(
+                        f"No next position found in block {block_idx}, step {unmask_step}"
+                    )
                     break
 
                 decode_order.append(next_unmask_pos)
@@ -465,17 +487,26 @@ class LogitsMixin:
                 log_prob = np.log(gt_prob + 1e-10)
                 all_log_probs.append(log_prob)
 
+                logger.debug(
+                    f"Unmasked pos {next_unmask_pos}, gt_token: {gt_token_id}, "
+                    f"gt_prob: {gt_prob:.4f}, peak_prob: {max_peak_prob:.4f}"
+                )
+
                 # Unmask with ground truth
                 current_block[next_unmask_pos] = gt_token_id
                 unmasked_positions.add(next_unmask_pos)
 
             all_decode_orders.append(decode_order)
-            current_step += block_size  # Move KV cache position forward by one block
+            logger.info(f"Block {block_idx} decode order: {decode_order}")
 
-        # End session
-        await self.end_session(session_id)
+        # Compute nll
+        if len(all_log_probs) == 0:
+            logger.error("No log probs collected!")
+            return float("inf"), all_decode_orders
 
         nll = -np.mean(all_log_probs)
+
+        logger.info(f"Sequence nll: {nll:.4f}, decode_orders: {all_decode_orders}")
 
         return seq_len, nll, all_decode_orders
 
@@ -490,36 +521,52 @@ class LogitsMixin:
         """Get logits with KV cache management for DLLM perplexity computation.
 
         Args:
-            input_ids (List[int]): full input sequence (previous blocks + current block)
+            input_ids (List[int]): full input sequence
             session_id (int): session ID for KV cache tracking
             sequence_start (bool): whether this is the start of the sequence
             sequence_end (bool): whether to end the session after this forward pass
-            step (int): current position in the KV cache (number of tokens already cached)
+            step (int): current position in the KV cache
 
         Returns:
             torch.Tensor: logits for all input positions, shape [seq_len, vocab_size]
         """
         from lmdeploy.messages import GenerationConfig
 
-        async with self.model_inst(session_id=session_id) as inst:
-            gen_config = GenerationConfig(
-                max_new_tokens=0,  # We only want logits, no generation
-                output_logits="all",  # Get logits for all positions
-                top_k=1,
-            )
+        try:
+            async with self.model_inst(session_id=session_id) as inst:
+                gen_config = GenerationConfig(
+                    max_new_tokens=0,  # We only want logits, no generation
+                    output_logits="all",  # Get logits for all positions
+                    top_k=1,
+                    # Important: these flags prevent DLLM from managing state
+                )
 
-            async with self.safe_run(
-                inst,
-                session_id=session_id,
-                input_ids=input_ids,
-                gen_config=gen_config,
-                stream_output=False,
-                sequence_start=sequence_start,
-                sequence_end=sequence_end,
-                step=step,
-            ) as gen:
-                async for outputs in gen:
-                    pass
+                async with self.safe_run(
+                    inst,
+                    session_id=session_id,
+                    input_ids=input_ids,
+                    gen_config=gen_config,
+                    stream_output=False,
+                    sequence_start=sequence_start,
+                    sequence_end=sequence_end,
+                    step=step,
+                ) as gen:
+                    outputs = None
+                    async for out in gen:
+                        outputs = out
 
-                # Return all logits
-                return outputs.logits
+                    # Check if we got valid outputs
+                    if outputs is None:
+                        raise ValueError(
+                            f"Engine returned None for session {session_id}"
+                        )
+
+                    if outputs.logits is None:
+                        raise ValueError(f"Logits is None for session {session_id}")
+
+                    return outputs.logits
+
+        except Exception as e:
+            logger = get_logger("lmdeploy")
+            logger.error(f"Error getting logits: {e}")
+            raise
