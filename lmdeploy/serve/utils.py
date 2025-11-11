@@ -440,9 +440,10 @@ class LogitsMixin:
         
         async with self.model_inst(session_id=session_id) as inst:
             gen_config = GenerationConfig(
-                max_new_tokens=0,
+                max_new_tokens=block_size,
                 output_logits='all',
-                top_k=1
+                top_k=1,
+                do_sample=False,  # Greedy decoding
             )
             
             async with self.safe_run(inst,
@@ -461,3 +462,4 @@ class LogitsMixin:
                 block_logits = outputs.logits[block_start:block_end, :]
                 
                 return block_logits
+            
