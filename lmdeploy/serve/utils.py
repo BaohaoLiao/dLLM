@@ -276,124 +276,127 @@ class LogitsMixin:
             result.append(loss.item() / target_count.item())
         logger.info(f"ppl result: {result}")
         return result
-    
-    def get_dllm_ppl(self, input_ids: Union[List[int], List[List[int]]], 
-                    batch_size: int = 4) -> List[Dict]:
+
+    def get_dllm_ppl(
+        self, input_ids: Union[List[int], List[List[int]]], batch_size: int = 4
+    ) -> List[Dict]:
         """Get perplexity using batched direct model access.
-        
+
         Args:
             input_ids: Single sequence or list of sequences
             batch_size: Number of sequences to process together
-        
+
         Returns:
             List of dictionaries with perplexity and decode_orders
         """
         assert isinstance(input_ids, List)
         if isinstance(input_ids[0], int):
             input_ids = [input_ids]
-        
+
         dllm_block_length = self.engine.model_config.dllm_block_length
         if dllm_block_length is None:
             raise ValueError("Model does not have DLLM configuration")
-        
+
         # Get model
         model = self._get_model()
-        
+
         # Process in batches
         all_results = []
         for i in range(0, len(input_ids), batch_size):
-            batch = input_ids[i:i + batch_size]
+            batch = input_ids[i : i + batch_size]
             batch_results = self._compute_dllm_ppl_direct(
                 batch, dllm_block_length, model
             )
-            
+
             for nll, decode_orders in batch_results:
-                all_results.append({
-                    'nll': nll,
-                    'decode_orders': decode_orders
-                })
-        
+                all_results.append({"nll": nll, "decode_orders": decode_orders})
+
         return all_results
-    
+
     def _get_model(self):
         """Get the underlying model."""
-        if self.backend == 'pytorch':
+        if self.backend == "pytorch":
             return self.engine.model_agent.model
         else:
-            raise NotImplementedError("Direct model access only supported for pytorch backend")
-    
-    def _compute_dllm_ppl_direct(self, input_ids_batch: List[List[int]], block_size: int, 
-                              model) -> List[tuple]:
+            raise NotImplementedError(
+                "Direct model access only supported for pytorch backend"
+            )
+
+    def _compute_dllm_ppl_direct(
+        self, input_ids_batch: List[List[int]], block_size: int, model
+    ) -> List[tuple]:
         """Compute perplexity for a batch of sequences using direct model access.
-        
+
         Args:
             input_ids_batch: List of sequences (each is List[int])
             block_size: DLLM block size
             model: The model instance
             tokenizer: The tokenizer
-        
+
         Returns:
             List of (perplexity, decode_orders) tuples for each sequence
         """
         import torch
         import numpy as np
-        
+
         batch_size = len(input_ids_batch)
         mask_token_id = model.model_config.dllm_mask_token
         device = next(model.parameters()).device
-        
+
         # Get sequence lengths and pad to block_size
         seq_lengths = [len(seq) for seq in input_ids_batch]
         padded_sequences = []
-        
+
         for input_ids in input_ids_batch:
             seq_len = len(input_ids)
             padding_len = (block_size - seq_len % block_size) % block_size
             if padding_len > 0:
                 input_ids = input_ids + [mask_token_id] * padding_len
             padded_sequences.append(input_ids)
-        
+
         # Calculate number of blocks for each sequence
         num_blocks_per_seq = [len(seq) // block_size for seq in padded_sequences]
         max_num_blocks = max(num_blocks_per_seq)
-        
+
         # Initialize tracking for each sequence
         all_log_probs = [[] for _ in range(batch_size)]
         all_decode_orders = [[] for _ in range(batch_size)]
         sequence_active = [True] * batch_size  # Track which sequences are still active
         current_block_idx = [0] * batch_size  # Current block index for each sequence
-        
+
         # Past KV cache for each sequence (previous completed blocks)
         past_key_values_batch = [None] * batch_size
-        
+
         with torch.inference_mode():
             # Loop 1: Iterate over maximum number of blocks
             for global_block_idx in range(max_num_blocks):
-                
                 # Determine which sequences are processing this block
                 active_in_this_block = []
                 for seq_idx in range(batch_size):
-                    if sequence_active[seq_idx] and current_block_idx[seq_idx] < num_blocks_per_seq[seq_idx]:
+                    if (
+                        sequence_active[seq_idx]
+                        and current_block_idx[seq_idx] < num_blocks_per_seq[seq_idx]
+                    ):
                         active_in_this_block.append(seq_idx)
-                
+
                 if len(active_in_this_block) == 0:
                     break  # All sequences done
-                
+
                 # Initialize current blocks for active sequences
                 current_blocks = {}  # seq_idx -> current_block
                 unmasked_positions = {}  # seq_idx -> set of unmasked positions
                 decode_orders = {}  # seq_idx -> decode order for this block
                 valid_positions_map = {}  # seq_idx -> set of valid positions
-                
+
                 for seq_idx in active_in_this_block:
                     block_idx = current_block_idx[seq_idx]
                     block_start = block_idx * block_size
-                    
+
                     # Initialize block with all masks
                     current_blocks[seq_idx] = [mask_token_id] * block_size
                     unmasked_positions[seq_idx] = set()
                     decode_orders[seq_idx] = []
-                    
+
                     # Determine valid positions (non-padding)
                     valid_positions = set()
                     seq_len = seq_lengths[seq_idx]
@@ -401,158 +404,170 @@ class LogitsMixin:
                         if block_start + pos < seq_len:
                             valid_positions.add(pos)
                     valid_positions_map[seq_idx] = valid_positions
-                    
+
                     # If no valid positions, mark sequence as inactive
                     if len(valid_positions) == 0:
                         sequence_active[seq_idx] = False
-                
+
                 # Remove sequences with no valid positions
-                active_in_this_block = [s for s in active_in_this_block if sequence_active[s]]
-                
+                active_in_this_block = [
+                    s for s in active_in_this_block if sequence_active[s]
+                ]
+
                 if len(active_in_this_block) == 0:
                     continue
-                
+
                 # Loop 2: Unmask tokens one by one (up to block_size iterations)
                 for unmask_step in range(block_size):
-                    
                     # Check if any sequence still has positions to unmask
                     sequences_to_process = []
                     for seq_idx in active_in_this_block:
-                        if len(unmasked_positions[seq_idx]) < len(valid_positions_map[seq_idx]):
+                        if len(unmasked_positions[seq_idx]) < len(
+                            valid_positions_map[seq_idx]
+                        ):
                             sequences_to_process.append(seq_idx)
-                    
+
                     if len(sequences_to_process) == 0:
                         break  # All active sequences finished unmasking this block
-                    
+
                     # Prepare batch input
                     batch_input_ids = []
                     batch_past_kvs = []
                     seq_idx_mapping = []  # Maps batch position to original seq_idx
-                    
+
                     for seq_idx in sequences_to_process:
                         block_idx = current_block_idx[seq_idx]
                         block_start = block_idx * block_size
-                        
+
                         # Construct input: [previous_blocks + current_block]
                         prev_blocks = padded_sequences[seq_idx][:block_start]
                         full_input = prev_blocks + current_blocks[seq_idx]
-                        
+
                         batch_input_ids.append(full_input)
                         batch_past_kvs.append(past_key_values_batch[seq_idx])
                         seq_idx_mapping.append(seq_idx)
-                    
+
                     # Handle different past_kv lengths by padding or separate forward passes
                     # For simplicity, process sequences with same history length together
                     grouped_by_history = {}
                     for i, seq_idx in enumerate(seq_idx_mapping):
-                        history_len = len(padded_sequences[seq_idx][:current_block_idx[seq_idx] * block_size])
+                        history_len = len(
+                            padded_sequences[seq_idx][
+                                : current_block_idx[seq_idx] * block_size
+                            ]
+                        )
                         if history_len not in grouped_by_history:
                             grouped_by_history[history_len] = []
                         grouped_by_history[history_len].append((i, seq_idx))
-                    
+
                     # Process each group
                     all_logits = {}  # seq_idx -> logits
-                    
+
                     for history_len, group in grouped_by_history.items():
                         group_indices = [i for i, _ in group]
                         group_seq_indices = [seq_idx for _, seq_idx in group]
-                        
+
                         # Prepare tensors for this group
                         group_input_ids = [batch_input_ids[i] for i in group_indices]
-                        
+
                         # Pad to same length within group
                         max_len = max(len(ids) for ids in group_input_ids)
                         padded_group_input = []
                         for ids in group_input_ids:
                             padded = ids + [mask_token_id] * (max_len - len(ids))
                             padded_group_input.append(padded)
-                        
-                        input_tensor = torch.tensor(padded_group_input, dtype=torch.long, device=device)
-                        
+
+                        input_tensor = torch.tensor(
+                            padded_group_input, dtype=torch.long, device=device
+                        )
+
                         # For now, process without past_kv to simplify
                         # (Full implementation would need to handle past_kv batching properly)
                         outputs = model(
                             input_ids=input_tensor,
                             past_key_values=None,  # Simplified: recompute each time
                             use_cache=False,
-                            return_dict=True
+                            return_dict=True,
                         )
-                        
+
                         # Extract logits for each sequence in group
                         for local_idx, seq_idx in enumerate(group_seq_indices):
                             block_idx = current_block_idx[seq_idx]
                             block_start = block_idx * block_size
-                            
+
                             # Get logits for current block
                             seq_logits = outputs.logits[local_idx]
-                            block_logits = seq_logits[-block_size:, :]  # Last block_size positions
+                            block_logits = seq_logits[
+                                -block_size:, :
+                            ]  # Last block_size positions
                             all_logits[seq_idx] = block_logits
-                    
+
                     # Now process logits for each sequence
                     for seq_idx in sequences_to_process:
                         if seq_idx not in all_logits:
                             continue
-                        
+
                         block_logits = all_logits[seq_idx]
                         block_idx = current_block_idx[seq_idx]
                         block_start = block_idx * block_size
-                        ground_truth_block = padded_sequences[seq_idx][block_start:block_start + block_size]
-                        
+                        ground_truth_block = padded_sequences[seq_idx][
+                            block_start : block_start + block_size
+                        ]
+
                         # Find position with highest peak probability
-                        max_peak_prob = -float('inf')
+                        max_peak_prob = -float("inf")
                         next_unmask_pos = None
-                        
+
                         for pos in range(block_size):
                             if pos in unmasked_positions[seq_idx]:
                                 continue
                             if pos not in valid_positions_map[seq_idx]:
                                 continue
-                            
+
                             probs = torch.softmax(block_logits[pos], dim=-1)
                             peak_prob = probs.max().item()
-                            
+
                             if peak_prob > max_peak_prob:
                                 max_peak_prob = peak_prob
                                 next_unmask_pos = pos
-                        
+
                         if next_unmask_pos is None:
                             continue
-                        
+
                         # Record decode order
                         decode_orders[seq_idx].append(next_unmask_pos)
-                        
+
                         # Collect ground truth probability
                         gt_token_id = ground_truth_block[next_unmask_pos]
                         probs = torch.softmax(block_logits[next_unmask_pos], dim=-1)
                         gt_prob = probs[gt_token_id].item()
                         log_prob = np.log(gt_prob + 1e-10)
                         all_log_probs[seq_idx].append(log_prob)
-                        
+
                         # Unmask with ground truth
                         current_blocks[seq_idx][next_unmask_pos] = gt_token_id
                         unmasked_positions[seq_idx].add(next_unmask_pos)
-                
+
                 # After finishing this block, save decode orders and move to next block
                 for seq_idx in active_in_this_block:
                     all_decode_orders[seq_idx].append(decode_orders[seq_idx])
                     current_block_idx[seq_idx] += 1
-                    
+
                     # Check if this sequence is done
                     if current_block_idx[seq_idx] >= num_blocks_per_seq[seq_idx]:
                         sequence_active[seq_idx] = False
-        
+
         # Compute perplexity for each sequence
         results = []
         for seq_idx in range(batch_size):
             if len(all_log_probs[seq_idx]) > 0:
                 nll = -np.mean(all_log_probs[seq_idx])
             else:
-                perplexity = float('inf')
-            
-            results.append((nll, all_decode_orders[seq_idx]))
-        
-        return results
+                perplexity = float("inf")
 
+            results.append((nll, all_decode_orders[seq_idx]))
+
+        return results
 
     # def get_dllm_ppl(
     #     self, input_ids: Union[List[int], List[List[int]]], max_concurrent: int = None

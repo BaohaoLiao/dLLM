@@ -147,9 +147,7 @@ def main(args):
 
             # Compute perplexity for this batch
             try:
-                batch_results = pipe.get_dllm_ppl(
-                    batch, max_concurrent=args.max_concurrent
-                )
+                batch_results = pipe.get_dllm_ppl(batch, batch_size=args.max_concurrent)
 
                 for seq_idx, result in enumerate(batch_results):
                     global_idx = start_idx + seq_idx
