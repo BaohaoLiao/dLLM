@@ -279,16 +279,21 @@ class LogitsMixin:
         """
         import asyncio
         
-        async def _process_single(seq_input_ids, seq_idx):
+        # Generate base session IDs that are guaranteed to be unique
+        # Use the internal session counter to avoid conflicts
+        base_session_ids = [next(self._session_id) for _ in range(len(input_ids_list))]
+        
+        async def _process_single(seq_input_ids, base_session_id):
             ppl, decode_orders = await self._async_get_single_sequence_dllm_ppl(
-                seq_input_ids, block_size, session_id_base=seq_idx * 10000
+                seq_input_ids, block_size, session_id_base=base_session_id
             )
             return {
                 'perplexity': ppl,
                 'decode_orders': decode_orders
             }
         
-        tasks = [_process_single(seq_input_ids, idx) for idx, seq_input_ids in enumerate(input_ids_list)]
+        tasks = [_process_single(seq_input_ids, base_id) 
+                for seq_input_ids, base_id in zip(input_ids_list, base_session_ids)]
         results = await asyncio.gather(*tasks)
         
         return results
@@ -323,76 +328,90 @@ class LogitsMixin:
         
         all_log_probs = []
         all_decode_orders = []
+
+        # Track all session IDs used for cleanup
+        used_session_ids = []
         
-        # Process each block
-        for block_idx in range(num_blocks):
-            block_start = block_idx * block_size
-            block_end = block_start + block_size
-            ground_truth_block = input_ids[block_start:block_end]
-            
-            # Determine which positions in this block are valid (not padding)
-            valid_positions = set()
-            for pos in range(block_size):
-                if block_start + pos < seq_len:
-                    valid_positions.add(pos)
-            
-            # Skip if entire block is padding
-            if len(valid_positions) == 0:
-                break
-            
-            # Initialize block with all masks
-            current_block = [mask_token_id] * block_size
-            unmasked_positions = set()
-            decode_order = []
-            
-            # Greedy unmasking: unmask one token at a time
-            for unmask_step in range(len(valid_positions)):
-                # Construct full input sequence
-                full_input = input_ids[:block_start] + current_block
+        try:
+            # Process each block
+            for block_idx in range(num_blocks):
+                block_start = block_idx * block_size
+                block_end = block_start + block_size
+                ground_truth_block = input_ids[block_start:block_end]
                 
-                # Get logits from model (use unique session_id)
-                session_id = session_id_base + block_idx * 100 + unmask_step
-                logits = await self._async_get_dllm_logits_single(
-                    input_ids=full_input,
-                    block_start=block_start,
-                    block_size=block_size,
-                    session_id=session_id
-                )  # [block_size, vocab_size]
-                
-                # Find position with highest peak probability among masked AND valid positions
-                max_peak_prob = -float('inf')
-                next_unmask_pos = None
-                
+                # Determine which positions in this block are valid (not padding)
+                valid_positions = set()
                 for pos in range(block_size):
-                    if pos in unmasked_positions:
-                        continue
-                    if pos not in valid_positions:
-                        continue
-                    
-                    probs = torch.softmax(logits[pos], dim=-1)
-                    peak_prob = probs.max().item()
-                    
-                    if peak_prob > max_peak_prob:
-                        max_peak_prob = peak_prob
-                        next_unmask_pos = pos
+                    if block_start + pos < seq_len:
+                        valid_positions.add(pos)
                 
-                if next_unmask_pos is None:
+                # Skip if entire block is padding
+                if len(valid_positions) == 0:
                     break
                 
-                decode_order.append(next_unmask_pos)
+                # Initialize block with all masks
+                current_block = [mask_token_id] * block_size
+                unmasked_positions = set()
+                decode_order = []
                 
-                # Get probability of ground truth token
-                gt_token_id = ground_truth_block[next_unmask_pos]
-                probs = torch.softmax(logits[next_unmask_pos], dim=-1)
-                gt_prob = probs[gt_token_id].item()
-                log_prob = np.log(gt_prob + 1e-10)
-                all_log_probs.append(log_prob)
+                # Greedy unmasking: unmask one token at a time
+                for unmask_step in range(len(valid_positions)):
+                    # Construct full input sequence
+                    full_input = input_ids[:block_start] + current_block
+                    
+                    # Get logits from model (use unique session_id)
+                    session_id = session_id_base + block_idx * 100 + unmask_step
+                    logits = await self._async_get_dllm_logits_single(
+                        input_ids=full_input,
+                        block_start=block_start,
+                        block_size=block_size,
+                        session_id=session_id
+                    )  # [block_size, vocab_size]
+                    
+                    # Find position with highest peak probability among masked AND valid positions
+                    max_peak_prob = -float('inf')
+                    next_unmask_pos = None
+                    
+                    for pos in range(block_size):
+                        if pos in unmasked_positions:
+                            continue
+                        if pos not in valid_positions:
+                            continue
+                        
+                        probs = torch.softmax(logits[pos], dim=-1)
+                        peak_prob = probs.max().item()
+                        
+                        if peak_prob > max_peak_prob:
+                            max_peak_prob = peak_prob
+                            next_unmask_pos = pos
+                    
+                    if next_unmask_pos is None:
+                        break
+                    
+                    decode_order.append(next_unmask_pos)
+                    
+                    # Get probability of ground truth token
+                    gt_token_id = ground_truth_block[next_unmask_pos]
+                    probs = torch.softmax(logits[next_unmask_pos], dim=-1)
+                    gt_prob = probs[gt_token_id].item()
+                    log_prob = np.log(gt_prob + 1e-10)
+                    all_log_probs.append(log_prob)
+                    
+                    # Unmask with ground truth
+                    current_block[next_unmask_pos] = gt_token_id
+                    unmasked_positions.add(next_unmask_pos)
                 
-                # Unmask with ground truth
-                current_block[next_unmask_pos] = gt_token_id
-                unmasked_positions.add(next_unmask_pos)
-            
-            all_decode_orders.append(decode_order)
+                all_decode_orders.append(decode_order)
+
+        finally:
+            # Always clean up all used sessions, even if an error occurred
+            for sid in used_session_ids:
+                try:
+                    await self.end_session(sid)
+                except Exception as e:
+                    # Log but don't fail if cleanup fails
+                    logger = get_logger('lmdeploy')
+                    logger.warning(f'Failed to clean up session {sid}: {e}')
         
         # Compute perplexity
         avg_log_prob = np.mean(all_log_probs)
