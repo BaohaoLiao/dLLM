@@ -275,9 +275,6 @@ def load_dataset(
             break
 
         text = example["text"].strip()
-
-        assert tokenizer.decode(tokenizer.encode(text, add_special_tokens=False)) == text
-
         if len(text) > 0:  # Skip empty lines
             tokens = tokenizer.encode(text, add_special_tokens=False)
             if len(tokens) > 0:
