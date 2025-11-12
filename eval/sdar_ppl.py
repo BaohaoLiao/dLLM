@@ -275,13 +275,16 @@ def load_dataset(
             break
 
         text = example["text"].strip()
+
+        assert tokenizer.decode(tokenizer.encode(text, add_special_tokens=False)) == text
+
         if len(text) > 0:  # Skip empty lines
             tokens = tokenizer.encode(text, add_special_tokens=False)
             if len(tokens) > 0:
                 # Truncate if too long
                 if len(tokens) > max_length:
                     tokens = tokens[:max_length]
-                sequences.append((text, tokens))
+                sequences.append((tokenizer.decode(tokens), tokens))
 
     # Sort sequences by length
     sequences.sort(key=lambda x: len(x[1]))
