@@ -404,7 +404,7 @@ def main(args):
 
     if args.save_decode_orders:
         decode_order_file = os.path.join(args.output_dir, "decode_orders.json")
-        print(f"\nSaving decode orders to {decode_order_file}...")
+        print(f"Saving decode orders to {decode_order_file}...")
         with open(decode_order_file, 'w') as f:
             json.dump(all_results, f, indent=2)
 
