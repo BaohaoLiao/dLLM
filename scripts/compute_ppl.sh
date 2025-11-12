@@ -9,15 +9,14 @@ mkdir -p ${SAVE_DIR}
 
 for block_len in 4; do
     echo "Evaluating block_length=${block_len}"
-    python sample/ppl.py \
+    python eval/sdar_ppl.py \
         --model_name_or_path ${MODEL} \
-        --tensor_parallel_size 1 \
+        --mask_token_id 151669 \
         --dataset_path ${DATA} \
-        --block_length ${block_len} \
-        --batch_size 8 \
-        --max_concurrent 8 \
         --max_samples 128 \
         --max_length 2048 \
+        --block_length ${block_len} \
+        --batch_size 8 \
         --output_file ${SAVE_DIR}/blocklen_${block_len}.json
 done
 
