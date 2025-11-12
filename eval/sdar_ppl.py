@@ -287,7 +287,7 @@ def load_dataset(
                 sequences.append((tokenizer.decode(tokens), tokens))
 
     # Sort sequences by length
-    sequences.sort(key=lambda x: len(x[1]))
+    sequences.sort(key=lambda x: len(x[1]), reverse=True)
 
     return sequences
 
