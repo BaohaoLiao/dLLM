@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import asyncio
+import itertools
 from typing import Dict, List, Tuple, Union
 
 import numpy as np
@@ -331,6 +332,14 @@ class LogitsMixin:
         # Semaphore to limit concurrency
         semaphore = asyncio.Semaphore(max_concurrent)
 
+        if not hasattr(self, "_dllm_session_id_allocator"):
+            self._dllm_session_id_allocator = itertools.count(start=0)
+
+        def _next_session_base():
+            # Reserve a wide session ID range per sequence to avoid collisions with
+            # block/step offsets in `_async_get_single_sequence_dllm_ppl`.
+            return next(self._dllm_session_id_allocator) * 1_000_000
+
         async def _process_single_with_semaphore(seq_input_ids, seq_idx):
             async with semaphore:
                 (
@@ -338,7 +347,9 @@ class LogitsMixin:
                     nll,
                     decode_orders,
                 ) = await self._async_get_single_sequence_dllm_ppl(
-                    seq_input_ids, block_size, session_id_base=seq_idx * 10000
+                    seq_input_ids,
+                    block_size,
+                    session_id_base=_next_session_base(),
                 )
                 return {
                     "num_tokens": seq_len,
