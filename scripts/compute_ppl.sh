@@ -17,7 +17,7 @@ for block_len in 4; do
         --max_length 2048 \
         --block_length ${block_len} \
         --batch_size 8 \
-        --output_file ${SAVE_DIR}/blocklen_${block_len}.json
+        --output_dir ${SAVE_DIR}
 done
 
 
