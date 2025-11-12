@@ -364,7 +364,7 @@ def main(args):
 
                 if args.save_decode_orders:
                     result_entry["text"] = sentences[start_idx:end_idx][seq_idx][0]
-                    result_entry["decode_orders"] = decode_orders
+                    result_entry["decode_orders"] = [order for order in decode_orders if order]
 
                 all_results.append(result_entry)
 
