@@ -16,9 +16,7 @@ for block_len in 4; do
         --max_samples 128 \
         --max_length 2048 \
         --block_length ${block_len} \
-        --batch_size 8 \
+        --batch_size 32 \
+        --save_decode_orders \
         --output_dir ${SAVE_DIR}
 done
-
-
-# --save_decode_orders
