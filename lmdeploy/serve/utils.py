@@ -404,111 +404,112 @@ class LogitsMixin:
 
         # Use unique session ID for this sequence
         session_id = session_id_base
+        session_started = False
 
-        # Process each block INDEPENDENTLY to avoid engine state conflicts
-        for block_idx in range(num_blocks):
-            block_start = block_idx * block_size
-            block_end = block_start + block_size
-            ground_truth_block = input_ids[block_start:block_end]
+        try:
+            for block_idx in range(num_blocks):
+                block_start = block_idx * block_size
+                block_end = block_start + block_size
+                ground_truth_block = input_ids[block_start:block_end]
 
-            # Determine valid positions
-            valid_positions = set()
-            for pos in range(block_size):
-                if block_start + pos < seq_len:
-                    valid_positions.add(pos)
-
-            if len(valid_positions) == 0:
-                break
-
-            logger.debug(
-                f"Processing block {block_idx}, valid_positions: {valid_positions}"
-            )
-
-            # Initialize block with all masks
-            current_block = [mask_token_id] * block_size
-            unmasked_positions = set()
-            decode_order = []
-
-            # Process this block with iterative unmasking
-            for unmask_step in range(len(valid_positions)):
-                # Construct input: previous blocks (ground truth) + current block state
-                if block_idx == 0:
-                    # First block: only current block
-                    full_input = current_block
-                else:
-                    # Subsequent blocks: all previous ground truth + current block state
-                    full_input = input_ids[:block_start] + current_block
-
-                logger.debug(
-                    f"Block {block_idx}, step {unmask_step}, input len: {len(full_input)}"
-                )
-
-                try:
-                    # Get logits - use different session for each block+step to avoid state conflicts
-                    step_session_id = session_id_base + block_idx * 1000 + unmask_step
-
-                    logits = await self._async_get_dllm_logits_with_cache(
-                        input_ids=full_input,
-                        session_id=step_session_id,
-                        sequence_start=True,  # Always start fresh to avoid state issues
-                        sequence_end=True,  # Always end to clean up
-                        step=0,  # Don't use KV cache for now
-                    )
-
-                    # Extract logits for current block (last block_size positions)
-                    block_logits = logits[-block_size:, :]
-
-                    logger.debug(
-                        f"Got logits shape: {logits.shape}, block_logits shape: {block_logits.shape}"
-                    )
-
-                except Exception as e:
-                    logger.error(f"Error in block {block_idx}, step {unmask_step}: {e}")
-                    raise
-
-                # Find position with highest peak probability among masked AND valid positions
-                max_peak_prob = -float("inf")
-                next_unmask_pos = None
-
+                # Determine valid positions
+                valid_positions = set()
                 for pos in range(block_size):
-                    if pos in unmasked_positions:
-                        continue
-                    if pos not in valid_positions:
-                        continue
+                    if block_start + pos < seq_len:
+                        valid_positions.add(pos)
 
-                    probs = torch.softmax(block_logits[pos], dim=-1)
-                    peak_prob = probs.max().item()
-
-                    if peak_prob > max_peak_prob:
-                        max_peak_prob = peak_prob
-                        next_unmask_pos = pos
-
-                if next_unmask_pos is None:
-                    logger.warning(
-                        f"No next position found in block {block_idx}, step {unmask_step}"
-                    )
+                if len(valid_positions) == 0:
                     break
 
-                decode_order.append(next_unmask_pos)
-
-                # Get probability of ground truth token
-                gt_token_id = ground_truth_block[next_unmask_pos]
-                probs = torch.softmax(block_logits[next_unmask_pos], dim=-1)
-                gt_prob = probs[gt_token_id].item()
-                log_prob = np.log(gt_prob + 1e-10)
-                all_log_probs.append(log_prob)
-
                 logger.debug(
-                    f"Unmasked pos {next_unmask_pos}, gt_token: {gt_token_id}, "
-                    f"gt_prob: {gt_prob:.4f}, peak_prob: {max_peak_prob:.4f}"
+                    f"Processing block {block_idx}, valid_positions: {valid_positions}"
                 )
 
-                # Unmask with ground truth
-                current_block[next_unmask_pos] = gt_token_id
-                unmasked_positions.add(next_unmask_pos)
+                # Initialize block with all masks
+                current_block = [mask_token_id] * block_size
+                unmasked_positions = set()
+                decode_order = []
 
-            all_decode_orders.append(decode_order)
-            logger.info(f"Block {block_idx} decode order: {decode_order}")
+                # Process this block with iterative unmasking
+                for unmask_step in range(len(valid_positions)):
+                    logger.debug(
+                        f"Block {block_idx}, step {unmask_step}, input len: {len(current_block)}"
+                    )
+
+                    try:
+                        logits = await self._async_get_dllm_logits_with_cache(
+                            input_ids=current_block,
+                            session_id=session_id,
+                            sequence_start=not session_started,
+                            sequence_end=False,
+                            step=block_start,
+                        )
+                        session_started = True
+
+                        block_logits = logits
+
+                        logger.debug(
+                            f"Got logits shape: {logits.shape}, block_logits shape: {block_logits.shape}"
+                        )
+
+                    except Exception as e:
+                        logger.error(
+                            f"Error in block {block_idx}, step {unmask_step}: {e}"
+                        )
+                        raise
+
+                    # Find position with highest peak probability among masked AND valid positions
+                    max_peak_prob = -float("inf")
+                    next_unmask_pos = None
+
+                    for pos in range(block_size):
+                        if pos in unmasked_positions:
+                            continue
+                        if pos not in valid_positions:
+                            continue
+
+                        probs = torch.softmax(block_logits[pos], dim=-1)
+                        peak_prob = probs.max().item()
+
+                        if peak_prob > max_peak_prob:
+                            max_peak_prob = peak_prob
+                            next_unmask_pos = pos
+
+                    if next_unmask_pos is None:
+                        logger.warning(
+                            f"No next position found in block {block_idx}, step {unmask_step}"
+                        )
+                        break
+
+                    decode_order.append(next_unmask_pos)
+
+                    # Get probability of ground truth token
+                    gt_token_id = ground_truth_block[next_unmask_pos]
+                    probs = torch.softmax(block_logits[next_unmask_pos], dim=-1)
+                    gt_prob = probs[gt_token_id].item()
+                    log_prob = np.log(gt_prob + 1e-10)
+                    all_log_probs.append(log_prob)
+
+                    logger.debug(
+                        f"Unmasked pos {next_unmask_pos}, gt_token: {gt_token_id}, "
+                        f"gt_prob: {gt_prob:.4f}, peak_prob: {max_peak_prob:.4f}"
+                    )
+
+                    # Unmask with ground truth
+                    current_block[next_unmask_pos] = gt_token_id
+                    unmasked_positions.add(next_unmask_pos)
+
+                all_decode_orders.append(decode_order)
+                logger.info(f"Block {block_idx} decode order: {decode_order}")
+
+        finally:
+            if session_started:
+                try:
+                    await self.engine.end_session(session_id)
+                except Exception as end_err:  # pragma: no cover - logging path
+                    logger.warning(
+                        f"Failed to end DLLM session {session_id}: {end_err}"
+                    )
 
         # Compute nll
         if len(all_log_probs) == 0:
