@@ -359,8 +359,7 @@ def main(args):
             for seq_idx, (seq_len, nll, decode_orders) in enumerate(batch_results):
                 result_entry = {
                     "num_tokens": seq_len,
-                    "num_blocks": len(decode_orders),
-                    "nll": nll,
+                    "nll": round(nll, 6),
                 }
 
                 if args.save_decode_orders:
@@ -394,7 +393,7 @@ def main(args):
     output_data = {
         "num_seqs": len(all_results),
         "avg_seq_len": avg_seq_len,
-        "ppl": corpus_ppl,
+        "ppl": round(corpus_ppl, 4),
     }
 
     ppl_file = os.path.join(args.output_dir, "ppl_result.json")
