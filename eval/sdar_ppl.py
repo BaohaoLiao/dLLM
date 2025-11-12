@@ -1,3 +1,4 @@
+import os
 import json
 import math
 import argparse
@@ -44,10 +45,10 @@ def parse_args():
         "--batch_size", type=int, default=32, help="Batch size for evaluation"
     )
     parser.add_argument(
-        "--output_file",
+        "--output_dir",
         type=str,
-        default="ppl_results.json",
-        help="Output file for results",
+        default="./outputs",
+        help="Output directory for results",
     )
     parser.add_argument(
         "--save_decode_orders",
@@ -61,7 +62,6 @@ def parse_args():
 @torch.no_grad()
 def compute_perplexity_block_diffusion_batch(
     model,
-    tokenizer,
     token_lists,
     mask_id,
     block_length=4,
@@ -281,15 +281,17 @@ def load_dataset(
                 # Truncate if too long
                 if len(tokens) > max_length:
                     tokens = tokens[:max_length]
-                sequences.append(tokens)
+                sequences.append((text, tokens))
 
     # Sort sequences by length
-    sequences.sort(key=len, reverse=True)
+    sequences.sort(key=lambda x: len(x[1]))
 
     return sequences
 
 
 def main(args):
+    os.makedirs(args.output_dir, exist_ok=True)
+
     print("=" * 60)
     print("Block Diffusion Model Perplexity Evaluation")
     print("=" * 60)
@@ -328,9 +330,9 @@ def main(args):
         return
 
     print(f"Loaded {len(sentences)} sequences from {args.dataset_path}")
-    print(f"Average sequence length: {np.mean([len(s) for s in sentences]):.1f}")
-    print(f"Min sequence length: {min(len(s) for s in sentences)}")
-    print(f"Max sequence length: {max(len(s) for s in sentences)}")
+    print(f"Average sequence length: {np.mean([len(s[1]) for s in sentences]):.1f}")
+    print(f"Min sequence length: {min(len(s[1]) for s in sentences)}")
+    print(f"Max sequence length: {max(len(s[1]) for s in sentences)}")
 
     # Evaluate perplexity in batches
     print("\nEvaluating perplexity...")
@@ -341,18 +343,17 @@ def main(args):
         for batch_idx in range(num_batches):
             start_idx = batch_idx * args.batch_size
             end_idx = min(start_idx + args.batch_size, len(sentences))
-            batch = sentences[start_idx:end_idx]
+            batch = [s[1] for s in sentences[start_idx:end_idx]]
 
             # Compute perplexity for this batch
             batch_results = compute_perplexity_block_diffusion_batch(
                 model=model,
-                tokenizer=tokenizer,
                 token_lists=batch,
                 mask_id=args.mask_token_id,
                 block_length=args.block_length,
             )
 
-            for _, (seq_len, nll, decode_orders) in enumerate(batch_results):
+            for seq_idx, (seq_len, nll, decode_orders) in enumerate(batch_results):
                 result_entry = {
                     "num_tokens": seq_len,
                     "num_blocks": len(decode_orders),
@@ -360,6 +361,7 @@ def main(args):
                 }
 
                 if args.save_decode_orders:
+                    result_entry["text"] = sentences[start_idx:end_idx][seq_idx][0]
                     result_entry["decode_orders"] = decode_orders
 
                 all_results.append(result_entry)
@@ -392,9 +394,16 @@ def main(args):
         "ppl": corpus_ppl,
     }
 
-    print(f"\nSaving results to {args.output_file}...")
-    with open(args.output_file, "w") as f:
+    ppl_file = os.path.join(args.output_dir, "ppl_result.json")
+    print(f"\nSaving ppl results to {ppl_file}...")
+    with open(ppl_file, "w") as f:
         json.dump(output_data, f, indent=2)
+
+    if args.save_decode_orders:
+        decode_order_file = os.path.join(args.output_dir, "decode_orders.json")
+        print(f"\nSaving decode orders to {decode_order_file}...")
+        with open(decode_order_file, 'w') as f:
+            json.dump(all_results, f, indent=2)
 
     print(f"Results saved successfully!")
     print("=" * 60)
