@@ -1,5 +1,7 @@
 #!/bin/bash
 
+export WANDB_PROJECT="dLLM"
+
 torchrun \
     --nnodes 1 \
     --node_rank 0 \
