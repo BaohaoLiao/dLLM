@@ -21,7 +21,7 @@ dataloader_num_workers: 4
 neat_packing: true
 
 ### output
-output_dir: /mnt/nushare2/data/baliao/dlm/01_sft
+output_dir: /mnt/nushare2/data/baliao/dlm/01_sft/SFT_100k_AR_Qwen3-1.7B
 logging_steps: 10
 save_steps: 500
 plot_loss: true
