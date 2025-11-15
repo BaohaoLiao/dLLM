@@ -290,7 +290,7 @@ def load_dataset(
     end = (local_idx + 1) * k + min(local_idx + 1, m)
     ds = ds.select(np.arange(start, end))
 
-    print(f"Selected data range for local_idx {local_idx}: [{start}, {end}]")
+    print(f"Selected data range for local_idx {local_idx} / {world_size}: [{start}, {end}] from total {data_size}")
 
     sequences = []
     for i, example in enumerate(ds):
