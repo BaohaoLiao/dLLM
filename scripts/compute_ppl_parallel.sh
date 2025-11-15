@@ -26,4 +26,7 @@ for block_len in 4; do
             --world_size ${#GPUS[@]} \
             --local_idx ${i} &
     done
+
+    wait
+    echo "Evaluation for block_length=${block_len} completed."
 done
