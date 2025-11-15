@@ -257,6 +257,35 @@ def compute_perplexity_block_diffusion_batch(
     return all_results
 
 
+def tokenize_and_filter(example, tokenizer, max_length):
+    """Tokenize and filter a single example"""
+    text = example["text"].strip()
+    
+    # Return None marker for empty texts
+    if len(text) == 0:
+        return {"tokens": None, "text": None, "length": 0}
+    
+    tokens = tokenizer.encode(text, add_special_tokens=False)
+    
+    # Return None marker for empty token sequences
+    if len(tokens) == 0:
+        return {"tokens": None, "text": None, "length": 0}
+    
+    # Truncate if too long
+    if len(tokens) > max_length:
+        tokens = tokens[:max_length]
+    
+    # Decode back to get normalized text
+    decoded_text = tokenizer.decode(tokens)
+    
+    return {
+        "tokens": tokens,
+        "text": decoded_text,
+        "length": len(tokens),
+        "text_hash": hash(decoded_text)
+    }
+
+
 def load_dataset(
     dataset_path: str,
     tokenizer,
@@ -271,11 +300,12 @@ def load_dataset(
     Args:
         dataset_path: path to a json file
         tokenizer: Tokenizer instance
-        max_samples: Maximum number of samples to evaluate (None = all)
         max_length: Maximum sequence length
+        world_size: Number of parallel processes
+        local_idx: Local process index
 
     Returns:
-        List of tokenized sequences
+        List of (text, tokens) tuples
     """
     ds = datasets.load_dataset("parquet", data_files=dataset_path, split="train")
 
@@ -292,20 +322,21 @@ def load_dataset(
 
     print(f"Selected data range for local_idx {local_idx} / {world_size}: [{start}, {end}] from total {data_size}")
 
-    sequences = []
-    for i, example in enumerate(ds):
-        text = example["text"].strip()
-        if len(text) > 0:  # Skip empty lines
-            tokens = tokenizer.encode(text, add_special_tokens=False)
-            if len(tokens) > 0:
-                # Truncate if too long
-                if len(tokens) > max_length:
-                    tokens = tokens[:max_length]
-                sequences.append((tokenizer.decode(tokens), tokens))
+    # Tokenize in parallel using map
+    ds = ds.map(
+        lambda x: tokenize_and_filter(x, tokenizer, max_length),
+        num_proc=4,  # Use multiple CPU cores for tokenization
+        desc="Tokenizing"
+    )
+    
+    # Filter out empty sequences
+    ds = ds.filter(lambda x: x["tokens"] is not None)
+    
+    # Sort by length (descending) then by text hash for deterministic ordering
+    ds = ds.sort(["length", "text_hash"], reverse=[True, False])
 
-    # Sort sequences by length (descending) and then by text hash for deterministic ordering
-    # This ensures the same order when resuming from checkpoint
-    sequences.sort(key=lambda x: (-len(x[1]), hash(x[0])))
+    # Convert to list of tuples
+    sequences = [(example["text"], example["tokens"]) for example in ds]
 
     return sequences
 
