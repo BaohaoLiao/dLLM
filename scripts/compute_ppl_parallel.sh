@@ -2,8 +2,8 @@
 
 MODEL_NAME=JetLM/SDAR-1.7B-Chat
 MODEL=/mnt/nushare2/data/baliao/PLLMs/${MODEL_NAME}
-DATA=/mnt/nushare2/data/baliao/dlm/data/hendrydong/test.json
-SAVE_DIR=/mnt/nushare2/data/baliao/dlm/00_start/ppl_results/${MODEL_NAME}
+DATA=/mnt/nushare2/data/baliao/dlm/data/hendrydong/train.parquet
+SAVE_DIR=/mnt/nushare2/data/baliao/dlm/00_start/decode_order/${MODEL_NAME}
 
 mkdir -p ${SAVE_DIR}
 

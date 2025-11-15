@@ -277,7 +277,7 @@ def load_dataset(
     Returns:
         List of tokenized sequences
     """
-    ds = datasets.load_dataset("json", data_files=dataset_path, split="train")
+    ds = datasets.load_dataset("parquet", data_files=dataset_path, split="train")
 
     if max_samples is not None:
         ds = ds.select(range(min(max_samples, len(ds))))
