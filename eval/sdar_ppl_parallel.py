@@ -55,20 +55,12 @@ def parse_args():
         action="store_true",
         help="Save decode orders for each sequence",
     )
-    parser.add_argument(
-        "--checkpoint_interval",
-        type=int,
-        default=100,
-        help="Save intermediate results every N sequences",
-    )
-    
+
     # Parallel generation
     parser.add_argument(
         "--world_size", type=int, default=1, help="Number of parallel processes"
     )
-    parser.add_argument(
-        "--local_idx", type=int, default=0, help="Local process index"
-    )
+    parser.add_argument("--local_idx", type=int, default=0, help="Local process index")
     args = parser.parse_args()
     return args
 
@@ -266,7 +258,12 @@ def compute_perplexity_block_diffusion_batch(
 
 
 def load_dataset(
-    dataset_path: str, tokenizer, max_samples: int=None, max_length: int = 512, world_size: int =1, local_idx: int=0
+    dataset_path: str,
+    tokenizer,
+    max_samples: int = None,
+    max_length: int = 512,
+    world_size: int = 1,
+    local_idx: int = 0,
 ):
     """
     Load evaluation dataset and tokenize, and order based on length
@@ -313,56 +310,89 @@ def load_dataset(
     return sequences
 
 
-def save_checkpoint(all_results, output_dir, checkpoint_num, save_decode_orders=False):
-    """Save intermediate results to a checkpoint file"""
-    checkpoint_file = os.path.join(output_dir, f"checkpoint_{checkpoint_num}.json")
-    
-    # Compute current statistics
+def compress_decode_orders(decode_orders):
+    """
+    Compress decode orders by converting list of lists to a compact string format.
+
+    Instead of: [[0, 2, 1, 3], [1, 0, 3, 2]]
+    Store as: "0,2,1,3|1,0,3,2"
+
+    This reduces JSON overhead significantly (no nested arrays, brackets, etc.)
+    """
+    return "|".join(",".join(map(str, block)) for block in decode_orders if block)
+
+
+def decompress_decode_orders(compressed):
+    """Decompress decode orders from compact string format back to list of lists"""
+    if not compressed:
+        return []
+    return [[int(x) for x in block.split(",")] for block in compressed.split("|")]
+
+
+def append_to_checkpoint(result_entry, checkpoint_file, save_decode_orders=False):
+    """
+    Append a single result to the checkpoint file incrementally.
+    This avoids loading all results into memory.
+    """
+    # Prepare the entry to save
+    entry_to_save = {
+        "num_tokens": result_entry["num_tokens"],
+        "nll": result_entry["nll"],
+    }
+
+    if save_decode_orders:
+        if "text" in result_entry:
+            entry_to_save["text"] = result_entry["text"]
+        if "decode_orders" in result_entry:
+            # Compress decode orders to save space
+            entry_to_save["decode_orders"] = compress_decode_orders(
+                result_entry["decode_orders"]
+            )
+
+    # Append to file (one JSON object per line for easy streaming)
+    with open(checkpoint_file, "a") as f:
+        f.write(json.dumps(entry_to_save) + "\n")
+
+
+def count_checkpoint_lines(checkpoint_file):
+    """Count the number of results already saved in checkpoint file"""
+    if not os.path.exists(checkpoint_file):
+        return 0
+
+    count = 0
+    with open(checkpoint_file, "r") as f:
+        for line in f:
+            if line.strip():  # Skip empty lines
+                count += 1
+    return count
+
+
+def compute_statistics_from_checkpoint(checkpoint_file):
+    """
+    Stream through checkpoint file and compute statistics without loading everything into memory.
+    """
     corpus_nll = 0
     corpus_num_tokens = 0
-    for result in all_results:
-        corpus_nll += result["nll"] * result["num_tokens"]
-        corpus_num_tokens += result["num_tokens"]
-    
+    num_seqs = 0
+
+    with open(checkpoint_file, "r") as f:
+        for line in f:
+            result = json.loads(line.strip())
+            corpus_nll += result["nll"] * result["num_tokens"]
+            corpus_num_tokens += result["num_tokens"]
+            num_seqs += 1
+
     corpus_avg_nll = corpus_nll / corpus_num_tokens if corpus_num_tokens > 0 else 0
     corpus_ppl = np.exp(corpus_avg_nll)
-    avg_seq_len = corpus_num_tokens / len(all_results) if len(all_results) > 0 else 0
-    
-    # Prepare results based on save_decode_orders flag
-    results_to_save = all_results if save_decode_orders else [
-        {"num_tokens": r["num_tokens"], "nll": r["nll"]} for r in all_results
-    ]
-    
-    checkpoint_data = {
-        "num_seqs": len(all_results),
+    avg_seq_len = corpus_num_tokens / num_seqs if num_seqs > 0 else 0
+
+    return {
+        "num_seqs": num_seqs,
         "avg_seq_len": avg_seq_len,
         "ppl": round(corpus_ppl, 4),
-        "results": results_to_save
+        "corpus_nll": corpus_nll,
+        "corpus_num_tokens": corpus_num_tokens,
     }
-    
-    with open(checkpoint_file, "w") as f:
-        json.dump(checkpoint_data, f, indent=2)
-    
-    return checkpoint_file
-
-
-def load_latest_checkpoint(output_dir):
-    """Load the latest checkpoint if it exists"""
-    checkpoint_files = [f for f in os.listdir(output_dir) if f.startswith("checkpoint_") and f.endswith(".json")]
-    
-    if not checkpoint_files:
-        return None, 0
-    
-    # Sort by checkpoint number
-    checkpoint_nums = [int(f.replace("checkpoint_", "").replace(".json", "")) for f in checkpoint_files]
-    latest_num = max(checkpoint_nums)
-    latest_file = os.path.join(output_dir, f"checkpoint_{latest_num}.json")
-    
-    print(f"Found checkpoint: {latest_file}")
-    with open(latest_file, "r") as f:
-        checkpoint_data = json.load(f)
-    
-    return checkpoint_data["results"], latest_num
 
 
 def main(args):
@@ -412,24 +442,27 @@ def main(args):
     print(f"Min sequence length: {min(len(s[1]) for s in sentences)}")
     print(f"Max sequence length: {max(len(s[1]) for s in sentences)}")
 
-    # Check for existing checkpoint
-    all_results, last_checkpoint_num = load_latest_checkpoint(args.output_dir)
-    if all_results is None:
-        all_results = []
-        start_idx = 0
-        print("\nNo checkpoint found. Starting from beginning...")
+    # Check for existing progress by counting lines in checkpoint file
+    checkpoint_file = os.path.join(
+        args.output_dir, f"checkpoint_{args.world_size}_{args.local_idx}.jsonl"
+    )
+    start_idx = count_checkpoint_lines(checkpoint_file)
+
+    if start_idx > 0:
+        print(f"\nResuming from sequence {start_idx}")
+        print(f"Found {start_idx} sequences already processed in checkpoint file")
     else:
-        start_idx = len(all_results)
-        print(f"\nResuming from checkpoint {last_checkpoint_num}")
-        print(f"Already processed {start_idx} sequences")
+        print("\nStarting from beginning...")
 
     # Evaluate perplexity in batches
     print("\nEvaluating perplexity...")
     num_batches = (len(sentences) + args.batch_size - 1) // args.batch_size
     sequences_processed = start_idx
-    checkpoint_counter = last_checkpoint_num + 1
+    last_printed_progress = start_idx
 
-    with tqdm(total=len(sentences), initial=start_idx, desc="Computing perplexity") as pbar:
+    with tqdm(
+        total=len(sentences), initial=start_idx, desc="Computing perplexity"
+    ) as pbar:
         for batch_idx in range(start_idx // args.batch_size, num_batches):
             batch_start_idx = batch_idx * args.batch_size
             batch_end_idx = min(batch_start_idx + args.batch_size, len(sentences))
@@ -437,7 +470,7 @@ def main(args):
             # Skip if we've already processed this batch (for checkpoint resume)
             if batch_start_idx < start_idx:
                 continue
-            
+
             batch = [s[1] for s in sentences[batch_start_idx:batch_end_idx]]
 
             # Compute perplexity for this batch
@@ -448,6 +481,7 @@ def main(args):
                 block_length=args.block_length,
             )
 
+            # Save results incrementally
             for seq_idx, (seq_len, nll, decode_orders) in enumerate(batch_results):
                 result_entry = {
                     "num_tokens": seq_len,
@@ -455,49 +489,48 @@ def main(args):
                 }
 
                 if args.save_decode_orders:
-                    result_entry["text"] = sentences[batch_start_idx:batch_end_idx][seq_idx][0]
-                    result_entry["decode_orders"] = [order for order in decode_orders if order]
+                    result_entry["text"] = sentences[batch_start_idx:batch_end_idx][
+                        seq_idx
+                    ][0]
+                    result_entry["decode_orders"] = [
+                        order for order in decode_orders if order
+                    ]
 
-                all_results.append(result_entry)
+                # Append to checkpoint file (streaming, no memory buildup)
+                append_to_checkpoint(
+                    result_entry, checkpoint_file, args.save_decode_orders
+                )
                 sequences_processed += 1
 
             pbar.update(len(batch))
 
-            # Save checkpoint at regular intervals
-            if sequences_processed % args.checkpoint_interval == 0 or batch_end_idx == len(sentences):
-                checkpoint_file = save_checkpoint(
-                    all_results, 
-                    args.output_dir, 
-                    checkpoint_counter,
-                    args.save_decode_orders
-                )
-                print(f"\nSaved checkpoint {checkpoint_counter} ({sequences_processed} sequences) to {checkpoint_file}")
-                checkpoint_counter += 1
+            # Print progress stats at regular intervals
+            if (
+                sequences_processed - last_printed_progress >= 2048
+                or batch_end_idx == len(sentences)
+            ):
+                # Compute and print current stats
+                stats = compute_statistics_from_checkpoint(checkpoint_file)
+                print(f"\nProgress: {sequences_processed}/{len(sentences)} sequences")
+                print(f"Current PPL: {stats['ppl']:.4f}")
+                last_printed_progress = sequences_processed
 
-    # Compute statistics
+    # Compute final statistics by streaming through checkpoint file
     print("\n" + "=" * 60)
     print("Evaluation Results")
     print("=" * 60)
 
-    corpus_nll = 0
-    corpus_num_tokens = 0
-    for result in all_results:
-        corpus_nll += result["nll"] * result["num_tokens"]
-        corpus_num_tokens += result["num_tokens"]
+    final_stats = compute_statistics_from_checkpoint(checkpoint_file)
 
-    corpus_avg_nll = corpus_nll / corpus_num_tokens
-    corpus_ppl = np.exp(corpus_avg_nll)
-    avg_seq_len = corpus_num_tokens / len(all_results)
+    print(f"Total sequences evaluated: {final_stats['num_seqs']}")
+    print(f"Perplexity: {final_stats['ppl']:.4f}")
+    print(f"Avg sequence length: {final_stats['avg_seq_len']:.1f}")
 
-    print(f"Total sequences evaluated: {len(all_results)}")
-    print(f"Perplexity: {corpus_ppl:.4f}")
-    print(f"Avg sequence length: {avg_seq_len:.1f}")
-
-    # Save final results
+    # Save final summary results
     output_data = {
-        "num_seqs": len(all_results),
-        "avg_seq_len": avg_seq_len,
-        "ppl": round(corpus_ppl, 4),
+        "num_seqs": final_stats["num_seqs"],
+        "avg_seq_len": final_stats["avg_seq_len"],
+        "ppl": final_stats["ppl"],
     }
 
     ppl_file = os.path.join(args.output_dir, "ppl_result.json")
@@ -506,10 +539,10 @@ def main(args):
         json.dump(output_data, f, indent=2)
 
     if args.save_decode_orders:
-        decode_order_file = os.path.join(args.output_dir, "decode_orders.json")
-        print(f"Saving decode orders to {decode_order_file}...")
-        with open(decode_order_file, 'w') as f:
-            json.dump(all_results, f, indent=2)
+        print(f"Detailed results (including decode orders) saved to {checkpoint_file}")
+        print(
+            "Note: decode_orders are stored in compressed format. Use decompress_decode_orders() to read them."
+        )
 
     print(f"Results saved successfully!")
     print("=" * 60)

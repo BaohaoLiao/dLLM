@@ -24,6 +24,6 @@ for block_len in 4; do
             --save_decode_orders \
             --output_dir ${SAVE_DIR} \
             --world_size ${#GPUS[@]} \
-            --local_idx ${i} \
-            --checkpoint_interval 20 &
+            --local_idx ${i} &
+    done
 done
